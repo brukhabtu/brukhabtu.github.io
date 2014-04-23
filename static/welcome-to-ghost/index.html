@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+    
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+
+    
+    <title>Mixins, SQLAlchemy, and Sphinx-Doc</title>
+    <meta name="description" content="" />
+
+    <meta name="HandheldFriendly" content="True" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <link rel="shortcut icon" href="../favicon.ico">
+
+    
+    <link rel="stylesheet" type="text/css" href="../assets/css/screen.css?v=082d106185" />
+    <link rel="stylesheet" type="text/css" href="http://fonts.googleapis.com/css?family=Noto+Serif:400,700,400italic|Open+Sans:700,400" />
+
+    
+    <meta name="generator" content="Ghost 0.4" />
+<link rel="alternate" type="application/rss+xml" title="Ghost" href="../rss/index.html">
+<link rel="canonical" href="http://my-ghost-blog.com/welcome-to-ghost/" />
+</head>
+<body class="post-template tag-getting-started">
+
+    
+    
+
+
+
+<main class="content" role="main">
+
+    <article class="post tag-getting-started">
+
+        
+        <header class="post-header">
+            <a class="blog-logo" href="http://my-ghost-blog.com">
+                
+                    <span class="blog-title">Ghost</span>
+                
+            </a>
+        </header>
+
+        
+        
+
+            <span class="post-meta"><time datetime="2014-04-23">23 Apr 2014</time> on <a href="../tag/getting-started/index.html">Getting Started</a></span>
+
+            <h1 class="post-title">Mixins, SQLAlchemy, and Sphinx-Doc</h1>
+
+            <section class="post-content">
+                <h3 id="theproblem">The Problem</h3>
+
+<p>Using the <code>@declared_attr</code> and <code>@func.expression</code> decorators in a mixin can cause Sphinx-doc to fail if the attribute in question is attempting to access a class attribute belonging to a child class before the mixin is inherited.</p>
+
+<pre><code>from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy import func, cast, overlay, 
+
+Base = declarative_base()
+
+class UTCTimeMixin(object):
+    @hybrid_property
+    def start_time_utc(self):
+        """ Return the start time at UTC as text. """
+        if self.start_time is None:
+            return self.start_time
+
+        return (self.start_time
+                .astimezone(tz.tzutc())
+                .isoformat()
+                .replace('+00:00', 'Z'))
+
+    @start_time_utc.expression
+    def start_time_utc(cls):
+        """ Return the start time at UTC as text. """
+        return case(
+            [(cls.start_time == None, None)],
+            else_=overlay(
+                cast(func.timezone('utc', cls.start_time),
+                     Unicode) + 'Z',
+                'T', 11, 1))
+
+class DumbClass(MultipleMixin, Base):
+    __tablename__ = '__dummy__'
+    start_time = Column(DateTime(True))
+</code></pre>
+
+<p>The <code>UTCTimeMixin</code> is inherited by <code>DumbClass</code> but <code>start_time_utc</code> tries to access <code>start_time</code>. <code>UTCTimeMixin</code> has no attribute named <code>start_time</code> so sphinx's inspect module will raise:</p>
+
+<blockquote>
+  <p>AttributeError: start_time_utc</p>
+</blockquote>
+
+<p>Upon inspection of sphinx's source code we see this:</p>
+
+<pre><code>def safe_getattr(obj, name, *defargs):
+    """A getattr() that turns all exceptions into AttributeErrors."""
+    try:
+        return getattr(obj, name, *defargs)
+    except Exception as e:
+        # this is a catch-all for all the weird things that some modules do
+        # with attribute access
+        if defargs:
+            return defargs[0]
+        raise AttributeError(name)
+</code></pre>
+
+<p>Accessing <code>start_time_utc</code> executes it and raises an Attribute Error on <code>cls.start_time</code>. This in turn is reraised by <code>safe_getattr</code> as an Attribute error on <code>start_time_utc</code>.  </p>
+
+<h3 id="solution">Solution</h3>
+
+<p><code>start_time_utc</code> can be replaced at runtime with a mock function that does nothing and has same doc string. This can be hooked in to <a href="http://sphinx-doc.org/ext/autodoc.html#event-autodoc-skip-member">autodoc-skip-member event.</a></p>
+
+<p>In conf.py add    </p>
+
+<pre><code>IGNORE_ERRORS_FOR = {'GuideMixin': ('fieldorder', 'fieldtypes'),
+                     'CommentMixin': ('comments',),
+                     'CopyBroadcastInfoMixin': ('start_time_utc',
+                                                'iso_duration',
+                                                'end_time')}
+
+
+def ignore_getattr(app, what, name, obj, skip, options):
+    for attribute_name in IGNORE_ERRORS_FOR.get(name, []):
+        try:
+            getattr(obj, attribute_name)
+        except AttributeError as e:
+            # Only patch ``obj`` if ``getattr`` fails.
+            def mock_function():
+                """ Documentation is missing """
+            mock_function.__doc__ = obj.__dict__.get(attribute_name).__doc__
+            setattr(obj, attribute_name, mock_function)
+
+
+def setup(app):
+    app.connect('autodoc-skip-member', ignore_getattr)
+</code></pre>
+
+<h3 id="pitfalls">Pitfalls</h3>
+
+<p>Sphinx will not include any decorators or paramaters as a part of the documentation for any attributes that have to be replaced with a mock function but some documentation is better than no documentation.</p>
+            </section>
+
+            <footer class="post-footer">
+
+                <section class="author">
+                    <h4>Bruk Habtu</h4>
+                    <p></p>
+                    <ul class="author-meta clearfix">
+                        
+                        
+                    </ul>
+                </section>
+
+                <section class="share">
+                    <h4>Share this post</h4>
+                    <a class="icon-twitter" href="https://twitter.com/share?text=Mixins%2C%20SQLAlchemy%2C%20and%20Sphinx-Doc&amp;url=http://my-ghost-blog.com/welcome-to-ghost/"
+                        onclick="window.open(this.href, 'twitter-share', 'width=550,height=235');return false;">
+                        <span class="hidden">Twitter</span>
+                    </a>
+                    <a class="icon-facebook" href="https://www.facebook.com/sharer/sharer.php?u=http://my-ghost-blog.com/welcome-to-ghost/"
+                        onclick="window.open(this.href, 'facebook-share','width=580,height=296');return false;">
+                        <span class="hidden">Facebook</span>
+                    </a>
+                    <a class="icon-google-plus" href="https://plus.google.com/share?url=http://my-ghost-blog.com/welcome-to-ghost/"
+                       onclick="window.open(this.href, 'google-plus-share', 'width=490,height=530');return false;">
+                        <span class="hidden">Google+</span>
+                    </a>
+                </section>
+
+            </footer>
+
+        
+
+    </article>
+
+</main>
+
+
+    <footer class="site-footer">
+        <a class="subscribe icon-feed" href="http://my-ghost-blog.com/rss/"><span class="tooltip">Subscribe!</span></a>
+        <div class="inner">
+             <section class="copyright">All content copyright <a href="http://my-ghost-blog.com/">Ghost</a> &copy; 2014 &bull; All rights reserved.</section>
+             <section class="poweredby">Proudly published with <a class="icon-ghost" href="https://ghost.org">Ghost</a></section>
+        </div>
+    </footer>
+
+    
+    <script src="../public/jquery.js?v=082d106185"></script>
+
+    
+    <script type="text/javascript" src="../assets/js/jquery.fitvids.js?v=082d106185"></script>
+    <script type="text/javascript" src="../assets/js/index.js?v=082d106185"></script>
+
+</body>
+</html>
